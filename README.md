@@ -87,7 +87,4 @@ Every push is built and tested on Windows by GitHub Actions. Pushing a tag like 
 
 ## Roadmap
 
-- Startup programs that slow down boot
-- History log ("what was slow an hour ago?")
-- Temperatures and thermal throttling
-- Code signing
+See [ROADMAP.md](ROADMAP.md).
