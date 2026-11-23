@@ -105,7 +105,7 @@ pub fn diagnose(history: &[Snapshot], own_pid: u32) -> Diagnosis {
     });
     if mem_pressure {
         let pct = avg(window, |s| s.mem_pct() as f64) as f32;
-        let severity = if pct >= MEM_CRIT || heavy_paging {
+        let severity = if pct.round() >= MEM_CRIT || heavy_paging {
             Severity::Critical
         } else {
             Severity::Warning
@@ -146,7 +146,7 @@ pub fn diagnose(history: &[Snapshot], own_pid: u32) -> Diagnosis {
     // ---- CPU ----------------------------------------------------------------------
     if sustained(window, |s| s.cpu_pct >= CPU_WARN) {
         let pct = avg(window, |s| s.cpu_pct as f64) as f32;
-        let severity = if pct >= CPU_CRIT {
+        let severity = if pct.round() >= CPU_CRIT {
             Severity::Critical
         } else {
             Severity::Warning
@@ -173,7 +173,7 @@ pub fn diagnose(history: &[Snapshot], own_pid: u32) -> Diagnosis {
     // ---- Disk ---------------------------------------------------------------------
     if sustained(window, |s| s.disk_busy_pct.unwrap_or(0.0) >= DISK_WARN) {
         let pct = avg(window, |s| s.disk_busy_pct.unwrap_or(0.0) as f64) as f32;
-        let severity = if pct >= DISK_CRIT {
+        let severity = if pct.round() >= DISK_CRIT {
             Severity::Critical
         } else {
             Severity::Warning
@@ -436,6 +436,7 @@ fn memory_advice(name: &str, bytes: u64) -> String {
         Kind::Antivirus => "This is your antivirus. Don't close it.".into(),
         Kind::System | Kind::WindowsUpdate => "This is part of Windows and shouldn't be closed.".into(),
         Kind::SearchIndexer => "Windows is indexing your files for search. It usually settles down on its own.".into(),
+        Kind::WebView => "Other apps (like Widgets, Teams or Outlook) use this to show web content. Close the apps you aren't using rather than ending it, which can break them.".into(),
         Kind::Other => format!("Closing {d} would free about {amount}."),
     }
 }
@@ -452,6 +453,7 @@ fn cpu_advice(name: &str, pct: f64) -> String {
         Kind::SearchIndexer => "Windows is indexing your files for search. It usually finishes on its own.".into(),
         Kind::MemoryCompression => "Windows is compressing memory because RAM is low. Free up memory to reduce this.".into(),
         Kind::System => "This is part of Windows. If it stays high for a long time, restarting your PC usually helps.".into(),
+        Kind::WebView => "An app that shows web content (like Widgets, Teams or Outlook) is busy. Close or restart that app.".into(),
         Kind::Other => format!("Closing {d} would free about {pct:.0}% of your CPU."),
     }
 }
@@ -503,6 +505,10 @@ fn disk_advice(name: &str) -> String {
         }
         Kind::MemoryCompression | Kind::System => {
             "This is part of Windows and shouldn't be closed.".into()
+        }
+        Kind::WebView => {
+            "An app that shows web content is saving its cache. It usually settles down on its own."
+                .into()
         }
         Kind::Other => format!("Closing {d} would reduce the load on your disk."),
     }
@@ -780,5 +786,40 @@ mod tests {
             .unwrap();
         assert!(f.detail.contains("7.5 GB of 8.0 GB"));
         assert_eq!(f.culprits[0].usage, "6.0 GB of video memory");
+    }
+
+    #[test]
+    fn severity_matches_the_rounded_percentage_shown() {
+        // 94.6% is displayed as "95%", so it must also be reported as critical.
+        let h = history(15, |_| {
+            snap(
+                20.0,
+                94.6,
+                5.0,
+                vec![group("msedge.exe", 14, 1.0, 3 * GB, 0.0)],
+            )
+        });
+        let f = &diagnose(&h, 1).findings[0];
+        assert!(f.detail.contains("(95%)"), "{}", f.detail);
+        assert_eq!(f.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn webview2_advice_points_to_the_app_using_it() {
+        let h = history(15, |_| {
+            snap(
+                20.0,
+                93.0,
+                5.0,
+                vec![group("msedgewebview2.exe", 6, 1.0, GB, 0.0)],
+            )
+        });
+        let c = &diagnose(&h, 1).findings[0].culprits[0];
+        assert_eq!(c.display, "Microsoft Edge WebView2");
+        assert!(
+            c.advice.contains("Close the apps you aren't using"),
+            "{}",
+            c.advice
+        );
     }
 }

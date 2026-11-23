@@ -11,6 +11,8 @@ pub enum Kind {
     SearchIndexer,
     /// Windows compresses RAM when it runs low. A symptom, not a cause.
     MemoryCompression,
+    /// Edge WebView2: shows web content inside other apps (Widgets, Teams, Outlook...).
+    WebView,
     Other,
 }
 
@@ -81,6 +83,7 @@ pub fn lookup(name: &str) -> Known {
         "steamwebhelper" => ("Steam web helper", Other),
         "spotify" => ("Spotify", Other),
         "onedrive" => ("OneDrive", Other),
+        "msedgewebview2" => ("Microsoft Edge WebView2", WebView),
         "python" | "pythonw" => ("Python", Other),
         "java" | "javaw" => ("Java", Other),
         "node" => ("Node.js", Other),
