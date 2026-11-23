@@ -8,12 +8,12 @@
   - Microsoft Trusted Signing (Azure): about $10/month, with a one-time identity check. Check whether it's available to individuals in your country.
   - A traditional certificate (Sectigo, DigiCert…): about $200–400/year, with a hardware key.
 - [ ] **New logo.** The current three rising bars look like a network/signal icon. The new one should say "finding what's slowing the PC down", for example a magnifier over a chart, or a gauge with a warning mark. Update `assets/icon.*`, the sidebar logo in `src/ui/widgets.rs`, and the README.
+- [ ] **History log.** Record every bottleneck the app detects: when it started and ended, what it was, how bad it got, and which programs were responsible. Show it on a new **History** page ("Yesterday 21:14–21:32: Memory 96%, Microsoft Edge 4.1 GB"), keep it between app restarts in a small file under `%LOCALAPPDATA%`, and allow exporting it (CSV). Also write a separate error log, so problems on other PCs can be diagnosed.
 - [ ] Set the version to `1.0.0`, merge into `main`, tag `v1.0.0`, and write the release notes (with a screenshot and SmartScreen guidance).
 
 ## After v1.0
 
 - [ ] Reduce the app's own memory use (about 150 MB on Windows, mostly the graphics driver).
 - [ ] Startup programs that slow down boot.
-- [ ] History log ("what was slow an hour ago?").
 - [ ] Temperatures and thermal throttling.
 - [ ] Per-program network usage.
