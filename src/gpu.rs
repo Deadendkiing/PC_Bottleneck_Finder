@@ -43,6 +43,26 @@ const VENDOR_INTEL: u32 = 0x8086;
 const VENDOR_AMD: u32 = 0x1002;
 const VENDOR_NVIDIA: u32 = 0x10DE;
 
+/// Orders GPUs the way Task Manager numbers them (GPU 0, GPU 1, ...).
+///
+/// DXGI lists the "high performance" GPU first on laptops, but Task Manager numbers
+/// GPUs in the order Windows registered them at startup, which is the order of their
+/// LUIDs (adapter IDs handed out in sequence).
+pub fn sort_like_task_manager(adapters: &mut [AdapterDesc]) {
+    adapters.sort_by_key(|a| ((a.luid.0 as u64) << 32) | a.luid.1 as u64);
+}
+
+/// Brand for compact labels: "Intel(R) UHD Graphics" -> "Intel".
+pub fn short_name(name: &str) -> String {
+    let first = name.split_whitespace().next().unwrap_or("GPU");
+    let brand = first.split('(').next().unwrap_or(first);
+    if brand.is_empty() {
+        "GPU".into()
+    } else {
+        brand.to_string()
+    }
+}
+
 pub fn classify(vendor_id: u32, name: &str, dedicated_total: u64) -> GpuKind {
     let lower = name.to_ascii_lowercase();
     match vendor_id {
@@ -298,6 +318,25 @@ mod tests {
             classify(VENDOR_AMD, "AMD Radeon RX 7600M XT", 8 * GB),
             GpuKind::Discrete
         );
+    }
+
+    #[test]
+    fn numbers_gpus_like_task_manager() {
+        // DXGI returned the NVIDIA card first; its LUID is higher, so it becomes GPU 1.
+        let mut a = laptop();
+        a.reverse();
+        assert!(a[0].name.contains("NVIDIA"));
+        sort_like_task_manager(&mut a);
+        assert!(a[0].name.contains("Intel"));
+        assert!(a[1].name.contains("NVIDIA"));
+    }
+
+    #[test]
+    fn short_gpu_names() {
+        assert_eq!(short_name("Intel(R) UHD Graphics"), "Intel");
+        assert_eq!(short_name("NVIDIA GeForce RTX 4060 Laptop GPU"), "NVIDIA");
+        assert_eq!(short_name("AMD Radeon(TM) Graphics"), "AMD");
+        assert_eq!(short_name(""), "GPU");
     }
 
     #[test]

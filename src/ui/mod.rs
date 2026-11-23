@@ -1013,7 +1013,13 @@ impl App {
                     Some(SortKey::Gpu) => {
                         heat(&p, g.gpu_pct / 80.0);
                         let text = match g.gpu_index {
-                            Some(i) if g.gpu_pct >= 0.05 => format!("{:.1}%  GPU {i}", g.gpu_pct),
+                            Some(i) if g.gpu_pct >= 0.05 => {
+                                let brand = s
+                                    .gpus
+                                    .get(i)
+                                    .map_or("GPU".into(), |x| crate::gpu::short_name(&x.name));
+                                format!("{:.1}%  {brand}", g.gpu_pct)
+                            }
                             _ => "0%".into(),
                         };
                         p.text(right, Align2::RIGHT_CENTER, text, theme::font(14.0), TEXT);

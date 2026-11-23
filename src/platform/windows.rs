@@ -168,6 +168,7 @@ fn list_adapters() -> Vec<AdapterDesc> {
             });
         }
     }
+    gpu::sort_like_task_manager(&mut out);
     out
 }
 
