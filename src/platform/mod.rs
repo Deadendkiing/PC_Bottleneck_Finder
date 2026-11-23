@@ -1,5 +1,9 @@
 //! OS-specific measurements that `sysinfo` doesn't provide:
-//! how busy each disk is, and how much Windows is paging memory to disk.
+//! how busy each disk is, how much Windows is paging memory to disk, and GPU usage.
+
+use crate::gpu::PidGpu;
+use crate::model::Gpu;
+use std::collections::HashMap;
 
 #[cfg(windows)]
 mod windows;
@@ -29,4 +33,7 @@ pub struct Extra {
     pub disk_busy: Option<(f32, String)>,
     /// Pages read from the page file / swap per second.
     pub paging_per_sec: Option<f64>,
+    pub gpus: Vec<Gpu>,
+    /// GPU use per process ID.
+    pub pid_gpu: HashMap<u32, PidGpu>,
 }

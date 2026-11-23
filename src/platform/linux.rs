@@ -49,6 +49,7 @@ impl Counters {
         Extra {
             disk_busy,
             paging_per_sec,
+            ..Default::default()
         }
     }
 }

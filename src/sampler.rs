@@ -6,11 +6,17 @@ use std::collections::HashMap;
 use std::time::Instant;
 use sysinfo::{Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+/// Anything that can produce snapshots: the real system, or demo data.
+pub trait Source: Send {
+    fn sample(&mut self) -> Snapshot;
+    /// Ends every process in `pids`. Returns how many could not be ended.
+    fn kill(&mut self, pids: &[u32]) -> usize;
+}
+
 pub struct Sampler {
     sys: System,
     nets: Option<Networks>,
     counters: Counters,
-    start: Instant,
     last: Instant,
 }
 
@@ -24,12 +30,13 @@ impl Sampler {
             sys,
             nets: Networks::new_with_refreshed_list().ok(),
             counters: Counters::new(),
-            start: now,
             last: now,
         })
     }
+}
 
-    pub fn sample(&mut self) -> Snapshot {
+impl Source for Sampler {
+    fn sample(&mut self) -> Snapshot {
         let now = Instant::now();
         let dt = now.duration_since(self.last).as_secs_f64().max(0.001);
         self.last = now;
@@ -39,8 +46,11 @@ impl Sampler {
         self.sys
             .refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind());
 
+        let extra = self.counters.sample();
         let cores = self.sys.cpus().len().max(1) as f32;
         let mut groups: HashMap<String, ProcGroup> = HashMap::new();
+        // Highest single-process GPU use seen per group, to pick the group's GPU.
+        let mut best_gpu: HashMap<String, f32> = HashMap::new();
         for (pid, p) in self.sys.processes() {
             // Skip kernel threads listed as processes and the idle pseudo-process.
             if p.thread_kind().is_some() || pid.as_u32() == 0 {
@@ -64,8 +74,23 @@ impl Sampler {
             g.max_core_pct = g.max_core_pct.max(cpu);
             g.mem += p.memory();
             g.disk_bps += (du.read_bytes + du.written_bytes) as f64 / dt;
+            if let Some(pg) = extra.pid_gpu.get(&pid.as_u32()) {
+                g.gpu_pct += pg.util;
+                g.gpu_mem += pg.dedicated;
+                let best = best_gpu.entry(g.name.clone()).or_insert(-1.0);
+                if pg.util > *best {
+                    *best = pg.util;
+                    g.gpu_index = Some(pg.adapter);
+                }
+            }
         }
-        let groups: Vec<ProcGroup> = groups.into_values().collect();
+        let groups: Vec<ProcGroup> = groups
+            .into_values()
+            .map(|mut g| {
+                g.gpu_pct = g.gpu_pct.min(100.0);
+                g
+            })
+            .collect();
 
         let (mut rx, mut tx) = (0u64, 0u64);
         if let Some(nets) = self.nets.as_mut() {
@@ -78,9 +103,7 @@ impl Sampler {
             }
         }
 
-        let extra = self.counters.sample();
         Snapshot {
-            t: now.duration_since(self.start).as_secs_f64(),
             cpu_pct: self.sys.global_cpu_usage(),
             core_pcts: self.sys.cpus().iter().map(|c| c.usage()).collect(),
             mem_used: self.sys.used_memory(),
@@ -91,12 +114,12 @@ impl Sampler {
             disk_bps: groups.iter().map(|g| g.disk_bps).sum(),
             net_rx_bps: rx as f64 / dt,
             net_tx_bps: tx as f64 / dt,
+            gpus: extra.gpus,
             groups,
         }
     }
 
-    /// Ends every process in `pids`. Returns how many could not be ended.
-    pub fn kill(&mut self, pids: &[u32]) -> usize {
+    fn kill(&mut self, pids: &[u32]) -> usize {
         pids.iter()
             .filter(|&&pid| {
                 !self

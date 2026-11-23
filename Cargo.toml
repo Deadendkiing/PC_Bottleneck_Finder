@@ -1,17 +1,19 @@
 [package]
 name = "pc-bottleneck-finder"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Finds what is slowing down your Windows PC and tells you how to fix it"
 
 [dependencies]
 # glow (OpenGL) renderer: smaller and lighter than the default wgpu.
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
-egui_plot = "0.38.0"
 sysinfo = "0.40.4"
 
 [target."cfg(windows)".dependencies]
-windows = { version = "0.62.2", features = ["Win32_System_Performance", "Win32_Foundation"] }
+windows = { version = "0.62.2", features = ["Win32_System_Performance", "Win32_Foundation", "Win32_Graphics_Dxgi"] }
+
+[build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 opt-level = 3

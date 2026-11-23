@@ -5,7 +5,7 @@
 //! recent window. Short spikes (opening an app, a page load) are ignored.
 
 use crate::knowledge::{self, Kind};
-use crate::model::{ProcGroup, Snapshot, fmt_bytes, fmt_rate};
+use crate::model::{GpuKind, ProcGroup, Snapshot, fmt_bytes, fmt_rate};
 use std::collections::HashMap;
 
 /// Number of recent samples (≈ seconds) the diagnosis looks at.
@@ -27,6 +27,13 @@ const HEAVY_PAGING: f64 = 1000.0;
 const SINGLE_CORE_BUSY: f32 = 90.0;
 const SINGLE_CORE_MAX_TOTAL: f32 = 60.0;
 const MAX_CULPRITS: usize = 3;
+const GPU_BUSY: f32 = 90.0;
+const VRAM_FULL: f32 = 90.0;
+/// Integrated GPU this busy while the discrete one is nearly idle = app on the wrong GPU.
+const IGPU_BUSY: f32 = 70.0;
+const DGPU_IDLE: f32 = 15.0;
+/// GPU use for a program to count as "a graphics-heavy app".
+const GPU_HEAVY_APP: f64 = 40.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -41,6 +48,9 @@ pub enum Resource {
     Cpu,
     Disk,
     SingleCore,
+    Gpu,
+    VideoMemory,
+    WrongGpu,
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +117,9 @@ pub fn diagnose(history: &[Snapshot], own_pid: u32) -> Diagnosis {
         };
         let culprits = top_groups(window, |g| g.mem as f64)
             .into_iter()
+            // Core Windows processes (e.g. 80 svchost.exe added together) always look big
+            // but there's nothing the user can do about them.
+            .filter(|(g, _)| knowledge::lookup(&g.name).kind != Kind::System)
             .filter(|(_, v)| *v >= 100.0 * 1024.0 * 1024.0)
             .take(MAX_CULPRITS)
             .map(|(g, v)| {
@@ -198,6 +211,122 @@ pub fn diagnose(history: &[Snapshot], own_pid: u32) -> Diagnosis {
                     .into(),
             ),
         });
+    }
+
+    // ---- GPU ------------------------------------------------------------------------
+    for (i, gpu) in latest.gpus.iter().enumerate() {
+        let util = |s: &Snapshot| s.gpus.get(i).map_or(0.0, |g| g.util_pct);
+        let on_this_gpu = |g: &ProcGroup| {
+            if g.gpu_index == Some(i) {
+                g.gpu_pct as f64
+            } else {
+                0.0
+            }
+        };
+
+        // A laptop running a heavy app on the integrated GPU while the discrete one idles.
+        let idle_dgpu = latest.gpus.iter().enumerate().find(|&(j, g)| {
+            j != i
+                && g.kind == GpuKind::Discrete
+                && sustained(window, |s| {
+                    s.gpus.get(j).is_some_and(|g| g.util_pct < DGPU_IDLE)
+                })
+        });
+        if gpu.kind == GpuKind::Integrated
+            && sustained(window, |s| util(s) >= IGPU_BUSY)
+            && let Some((_, dgpu)) = idle_dgpu
+            && let Some((g, v)) = top_groups(window, on_this_gpu).into_iter().find(|(g, v)| {
+                *v >= GPU_HEAVY_APP && !knowledge::is_protected(&g.name, &g.pids, own_pid)
+            })
+        {
+            let app = knowledge::display_name(&g.name);
+            let igpu_pct = avg(window, |s| util(s) as f64);
+            findings.push(Finding {
+                resource: Resource::WrongGpu,
+                severity: Severity::Warning,
+                headline: format!("{app} is running on your integrated graphics"),
+                detail: format!(
+                    "{app} keeps {} at {igpu_pct:.0}% while your {} is almost idle. \
+                     The integrated chip is much slower, so games and 3D apps get low frame rates.",
+                    gpu.name, dgpu.name
+                ),
+                culprits: vec![culprit(
+                    &g,
+                    format!("{v:.0}% of {}", gpu.name),
+                    format!(
+                        "Open Settings > System > Display > Graphics, choose {app}, set it to High performance ({}), then restart {app}.",
+                        dgpu.name
+                    ),
+                    own_pid,
+                )],
+                tip: Some("Also plug in your charger: many laptops hold back the discrete GPU on battery.".into()),
+            });
+            continue;
+        }
+
+        if sustained(window, |s| util(s) >= GPU_BUSY) {
+            let pct = avg(window, |s| util(s) as f64);
+            let culprits = top_groups(window, on_this_gpu)
+                .into_iter()
+                .filter(|(_, v)| *v >= 3.0)
+                .take(MAX_CULPRITS)
+                .map(|(g, v)| {
+                    culprit(
+                        &g,
+                        format!("{v:.0}% of this GPU"),
+                        gpu_advice(&g.name, v),
+                        own_pid,
+                    )
+                })
+                .collect();
+            findings.push(Finding {
+                resource: Resource::Gpu,
+                severity: Severity::Warning,
+                headline: format!("Your graphics card is the bottleneck ({})", gpu.name),
+                detail: format!(
+                    "It has averaged {pct:.0}% over the last {secs} seconds, mostly on its {} engine.",
+                    engine_label(&gpu.top_engine)
+                ),
+                culprits,
+                tip: Some(
+                    "While gaming this is normal: the graphics card is running at full speed and the rest of your PC isn't holding it back."
+                        .into(),
+                ),
+            });
+        }
+
+        let vram = |s: &Snapshot| s.gpus.get(i).and_then(|g| g.vram_pct()).unwrap_or(0.0);
+        if gpu.vram_pct().is_some() && sustained(window, |s| vram(s) >= VRAM_FULL) {
+            let culprits = top_groups(window, |g| {
+                if g.gpu_index == Some(i) { g.gpu_mem as f64 } else { 0.0 }
+            })
+            .into_iter()
+            .filter(|(_, v)| *v >= 200.0 * 1024.0 * 1024.0)
+            .take(MAX_CULPRITS)
+            .map(|(g, v)| {
+                let d = knowledge::display_name(&g.name);
+                culprit(
+                    &g,
+                    format!("{} of video memory", fmt_bytes(v as u64)),
+                    format!("Lower the texture quality in {d}, or close other programs that use the graphics card."),
+                    own_pid,
+                )
+            })
+            .collect();
+            findings.push(Finding {
+                resource: Resource::VideoMemory,
+                severity: Severity::Warning,
+                headline: format!("Video memory on {} is almost full", gpu.name),
+                detail: format!(
+                    "{} of {} ({:.0}%) is in use. When it runs out, games stutter and textures load slowly.",
+                    fmt_bytes(gpu.dedicated_used),
+                    fmt_bytes(gpu.dedicated_total),
+                    vram(latest)
+                ),
+                culprits,
+                tip: None,
+            });
+        }
     }
 
     // ---- Single-threaded program ----------------------------------------------------
@@ -327,6 +456,35 @@ fn cpu_advice(name: &str, pct: f64) -> String {
     }
 }
 
+fn engine_label(engine: &str) -> &str {
+    match engine {
+        "3D" => "3D (drawing graphics)",
+        "VideoDecode" | "Video Decode" => "video playback",
+        "VideoEncode" | "Video Encode" => "video recording and streaming",
+        "Copy" => "copy (moving data)",
+        e if e.starts_with("Compute") => "compute",
+        "" => "main",
+        e => e,
+    }
+}
+
+fn gpu_advice(name: &str, pct: f64) -> String {
+    let k = knowledge::lookup(name);
+    let d = knowledge::display_name(name);
+    match k.kind {
+        Kind::Browser => format!("Video or animations in {d}. Closing tabs that play video will help."),
+        Kind::System if knowledge::normalize(name) == "dwm" => {
+            "Windows uses this to draw your screen. Many windows or high refresh-rate monitors add to it.".into()
+        }
+        Kind::System | Kind::MemoryCompression | Kind::WindowsUpdate => {
+            "This is part of Windows and shouldn't be closed.".into()
+        }
+        _ => format!(
+            "{d} is using {pct:.0}% of the GPU. Lowering its resolution or graphics quality will reduce the load."
+        ),
+    }
+}
+
 fn disk_advice(name: &str) -> String {
     let k = knowledge::lookup(name);
     let d = knowledge::display_name(name);
@@ -364,6 +522,41 @@ mod tests {
             max_core_pct: cpu,
             mem,
             disk_bps: disk,
+            ..Default::default()
+        }
+    }
+
+    fn gpu_snap(igpu: f32, dgpu: f32, vram_used: u64, groups: Vec<ProcGroup>) -> Snapshot {
+        use crate::model::Gpu;
+        let mut s = snap(30.0, 50.0, 5.0, groups);
+        s.gpus = vec![
+            Gpu {
+                name: "Intel(R) UHD Graphics".into(),
+                kind: GpuKind::Integrated,
+                util_pct: igpu,
+                top_engine: "3D".into(),
+                dedicated_total: 128 << 20,
+                ..Default::default()
+            },
+            Gpu {
+                name: "NVIDIA GeForce RTX 4060 Laptop GPU".into(),
+                kind: GpuKind::Discrete,
+                util_pct: dgpu,
+                top_engine: "3D".into(),
+                dedicated_used: vram_used,
+                dedicated_total: 8 * GB,
+                ..Default::default()
+            },
+        ];
+        s
+    }
+
+    fn on_gpu(name: &str, gpu: usize, pct: f32, vram: u64) -> ProcGroup {
+        ProcGroup {
+            gpu_index: Some(gpu),
+            gpu_pct: pct,
+            gpu_mem: vram,
+            ..group(name, 1, 10.0, GB, 0.0)
         }
     }
 
@@ -429,9 +622,9 @@ mod tests {
         assert_eq!(top.usage, "5.2 GB across 38 processes");
         assert!(top.advice.contains("Close tabs"), "{}", top.advice);
         assert!(top.can_close);
-        // svchost is ranked but must never be closable
-        let svc = f.culprits.iter().find(|c| c.name == "svchost.exe").unwrap();
-        assert!(!svc.can_close);
+        // svchost (80 Windows services added together) isn't actionable, so it's left out
+        assert!(f.culprits.iter().all(|c| c.name != "svchost.exe"));
+        assert_eq!(f.culprits[1].display, "Visual Studio Code");
     }
 
     #[test]
@@ -514,5 +707,78 @@ mod tests {
         let d = diagnose(&h, 1);
         assert_eq!(d.findings[0].resource, Resource::Memory); // critical
         assert_eq!(d.findings[1].resource, Resource::Cpu); // warning
+    }
+
+    #[test]
+    fn game_on_integrated_gpu_points_to_the_right_setting() {
+        let h = history(15, |_| {
+            gpu_snap(95.0, 2.0, 0, vec![on_gpu("SpaceRacer.exe", 0, 88.0, 0)])
+        });
+        let d = diagnose(&h, 1);
+        assert_eq!(d.findings.len(), 1, "{:?}", d.findings);
+        let f = &d.findings[0];
+        assert_eq!(f.resource, Resource::WrongGpu);
+        assert!(f.headline.contains("SpaceRacer.exe"));
+        assert!(
+            f.culprits[0]
+                .advice
+                .contains("High performance (NVIDIA GeForce RTX 4060 Laptop GPU)")
+        );
+    }
+
+    #[test]
+    fn busy_integrated_gpu_without_idle_discrete_is_a_plain_gpu_bottleneck() {
+        // Discrete GPU also busy: not the "wrong GPU" problem.
+        let h = history(15, |_| {
+            gpu_snap(95.0, 60.0, 0, vec![on_gpu("SpaceRacer.exe", 0, 88.0, 0)])
+        });
+        let f = &diagnose(&h, 1).findings[0];
+        assert_eq!(f.resource, Resource::Gpu);
+    }
+
+    #[test]
+    fn gaming_on_discrete_gpu_is_reported_as_gpu_bound() {
+        let h = history(15, |_| {
+            gpu_snap(
+                5.0,
+                99.0,
+                3 * GB,
+                vec![on_gpu("SpaceRacer.exe", 1, 97.0, 3 * GB)],
+            )
+        });
+        let d = diagnose(&h, 1);
+        let f = d
+            .findings
+            .iter()
+            .find(|f| f.resource == Resource::Gpu)
+            .unwrap();
+        assert!(f.headline.contains("NVIDIA"));
+        assert!(f.detail.contains("3D (drawing graphics)"));
+        assert!(f.tip.as_ref().unwrap().contains("normal"));
+        assert!(f.culprits[0].advice.contains("graphics quality"));
+        assert!(
+            d.findings
+                .iter()
+                .all(|f| f.resource != Resource::VideoMemory)
+        );
+    }
+
+    #[test]
+    fn full_video_memory_is_reported() {
+        let h = history(15, |_| {
+            gpu_snap(
+                5.0,
+                50.0,
+                7 * GB + GB / 2,
+                vec![on_gpu("SpaceRacer.exe", 1, 50.0, 6 * GB)],
+            )
+        });
+        let f = diagnose(&h, 1)
+            .findings
+            .into_iter()
+            .find(|f| f.resource == Resource::VideoMemory)
+            .unwrap();
+        assert!(f.detail.contains("7.5 GB of 8.0 GB"));
+        assert_eq!(f.culprits[0].usage, "6.0 GB of video memory");
     }
 }
